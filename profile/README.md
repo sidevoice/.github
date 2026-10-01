@@ -9,7 +9,7 @@ already have with your agent into a voice call. The agent keeps its context and 
 speaks its replies, and you answer by voice and can interrupt it — from the sofa or on a walk, not only at your desk.
 Your agent stays where it runs.
 
-Open source; the licence is being decided ([#11](https://github.com/sidevoice/.github/issues/11)). Beta.
+Open source under the Apache License 2.0; the name and logo are trademarks (forks welcome under their own name). Beta.
 
 ## The pieces
 
