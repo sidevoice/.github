@@ -1,4 +1,3 @@
 # sidevoice/.github
 
-Organisation-wide meta for Sidevoice: GitHub settings (`GITHUB-SETUP.md`) and, later, shared community files and workflows.
-# (no changes)
+The Sidevoice organisation's public profile (`profile/README.md`) and, later, the community files shared by every repository.
