@@ -1,0 +1,97 @@
+# Moves an issue across the Status of the organization's project (https://github.com/orgs/sidevoice/projects/1) as
+# work on it starts and its pull request goes through review. The project's own workflows cover the rest: an item
+# added lands in Backlog, a closed item goes to Done.
+#
+# Each repository calls this from its .github/workflows/project-status.yml, declared in sidevoice/infrastructure.
+# The workflow token cannot write organization projects, so it acts as the Sidevoice Projects GitHub App.
+name: Project status
+
+on:
+  workflow_call:
+    inputs:
+      project-number:
+        type: number
+        default: 1
+    secrets:
+      PROJECTS_APP_PRIVATE_KEY:
+        required: true
+
+permissions: {}
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    # Pull requests from forks get no secrets; there is nothing to move for them.
+    if: github.event_name == 'issues' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.PROJECTS_APP_ID }}
+          private-key: ${{ secrets.PROJECTS_APP_PRIVATE_KEY }}
+          owner: sidevoice
+
+      - env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PROJECT_NUMBER: ${{ inputs.project-number }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          ISSUE_ID: ${{ github.event.issue.node_id }}
+          PR_ID: ${{ github.event.pull_request.node_id }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+        run: |
+          set -euo pipefail
+
+          # Which Status this event asks for, and whether it may move an item back from In Review.
+          back=false
+          case "$EVENT/$ACTION" in
+            issues/assigned) target="In Progress" ;;
+            pull_request/opened|pull_request/reopened)
+              if [ "$PR_DRAFT" = true ]; then target="In Progress"; else target="In Review"; fi ;;
+            pull_request/ready_for_review) target="In Review" ;;
+            pull_request/converted_to_draft) target="In Progress"; back=true ;;
+            pull_request_review/submitted)
+              [ "$REVIEW_STATE" = changes_requested ] || exit 0
+              target="In Progress"; back=true ;;
+            *) exit 0 ;;
+          esac
+
+          project=$(gh api graphql -F n="$PROJECT_NUMBER" -f query='
+            query($n: Int!) { organization(login: "sidevoice") { projectV2(number: $n) {
+              id field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } } } } }' \
+            --jq '.data.organization.projectV2')
+          project_id=$(jq -r .id <<<"$project")
+          field_id=$(jq -r .field.id <<<"$project")
+          option_id=$(jq -r --arg t "$target" '.field.options[] | select(.name == $t) | .id' <<<"$project")
+          [ -n "$option_id" ] || { echo "::error::Status has no option '$target'"; exit 1; }
+
+          # The issues to move: the event's own, or those the pull request closes.
+          if [ -n "$ISSUE_ID" ]; then
+            issues=$ISSUE_ID
+          else
+            issues=$(gh api graphql -f id="$PR_ID" -f query='
+              query($id: ID!) { node(id: $id) { ... on PullRequest { closingIssuesReferences(first: 20) { nodes { id } } } } }' \
+              --jq '.data.node.closingIssuesReferences.nodes[].id')
+          fi
+
+          for issue in $issues; do
+            # Adding an item already in the project returns the existing one.
+            item=$(gh api graphql -f p="$project_id" -f c="$issue" -f query='
+              mutation($p: ID!, $c: ID!) { addProjectV2ItemById(input: {projectId: $p, contentId: $c}) { item { id
+                fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } }' \
+              --jq '.data.addProjectV2ItemById.item')
+            item_id=$(jq -r .id <<<"$item")
+            current=$(jq -r '.fieldValueByName.name // ""' <<<"$item")
+
+            # Never move what is finished, never repeat a move, and only go back from In Review when asked to.
+            case "$current" in
+              Done|"$target") continue ;;
+              "In Review") [ "$back" = true ] || continue ;;
+            esac
+
+            gh api graphql -f p="$project_id" -f i="$item_id" -f f="$field_id" -f o="$option_id" -f query='
+              mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) { updateProjectV2ItemFieldValue(input: {
+                projectId: $p, itemId: $i, fieldId: $f, value: {singleSelectOptionId: $o}}) { projectV2Item { id } } }' >/dev/null
+            echo "$issue: ${current:-no status} -> $target"
+          done
